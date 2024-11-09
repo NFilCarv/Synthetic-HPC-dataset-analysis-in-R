@@ -1,0 +1,346 @@
+---
+title: "HPC Job Behavioudr Prediction Model"
+output: html_notebook
+---
+
+This notebook contains data analysis of the synthetic dataset from [the thesis repository](https://github.com/NFilCarv/Performance-and-Carbon-Footprint-Modelling-of-Irregular-Tasks/blob/main/HPCsyntheticdata.parquet), developed in the master's degree thesis "Performance-and-Carbon-Footprint-Modelling-of-Irregular-Tasks".
+
+1.  Import Dataset, check for missing values and convert necessary values to factors.
+
+```{r setup}
+# Load required libraries
+if (!requireNamespace("arrow", quietly = TRUE)) install.packages("arrow")
+library(arrow)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(data.table)
+library(gridExtra)
+
+# Load the dataset
+df <- read_parquet("HPCsyntheticdata.parquet")
+
+# Remove rows with NA in the "inst" column
+df <- df %>% filter(!is.na(inst))
+
+# Impute remaining missing values with column means for numeric columns
+df <- df %>% mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+# Convert categorical columns to factors
+df$qos <- as.factor(df$qos)
+df$label <- as.factor(df$label)
+```
+
+2.  Check for data types for the metrics within the dataset
+
+```{r}
+# Print data types of each column
+sapply(df, class)
+
+```
+
+3.  Characterize the collumn by calculating parameters like mean, min and max.
+
+```{r}
+# Generate summary characteristics table for each column
+library(dplyr)
+
+# Function to summarize each column's characteristics
+characterize_columns <- function(data) {
+  summary_table <- data.frame(
+    Column = names(data),
+    DataType = sapply(data, class),
+    MissingValues = sapply(data, function(x) sum(is.na(x))),
+    UniqueValues = sapply(data, function(x) length(unique(x))),
+    Mean = sapply(data, function(x) if (is.numeric(x)) mean(x, na.rm = TRUE) else NA),
+    Median = sapply(data, function(x) if (is.numeric(x)) median(x, na.rm = TRUE) else NA),
+    SD = sapply(data, function(x) if (is.numeric(x)) sd(x, na.rm = TRUE) else NA)
+  )
+  return(summary_table)
+}
+
+# Create the table
+column_summary <- characterize_columns(df)
+
+# Print the summary table
+print(column_summary)
+
+```
+
+4.  Plot the distribution for each metric inside the dataset.
+
+```{r}
+library(ggplot2)
+library(gridExtra)  
+library(rlang)
+library(conflicted)
+conflict_prefer("string", "arrow")
+conflict_prefer(":=", "data.table")
+
+
+plot_fill <- "skyblue"
+plot_color <- "black"
+
+# Numeric variables for histogram plots
+numeric_vars <- c("inst", "bi", "mem_req", "num_gpus_req", "num_cores_req", "run_time", 
+                  "mean_power", "total_power", "priority", "eligible_time_epoch")
+
+# Create individual plots for each numeric variable with conditional log scaling if needed
+plots <- lapply(numeric_vars, function(var) {
+  plot <- ggplot(df, aes(x = !!sym(var))) +
+    geom_histogram(fill = plot_fill, color = plot_color, alpha = 0.7, bins = 30) +
+    labs(title = paste("Distribution of", var),
+         x = ifelse(any(df[[var]] <= 0), var, paste(var, "(Log Scale)")),
+         y = "Frequency") +
+    theme_minimal()
+  
+  # Add log scaling if all values are greater than 0
+  if (all(df[[var]] > 0)) {
+    plot <- plot + scale_x_log10()
+  }
+  
+  return(plot)
+})
+
+# Display plots in a grid format
+do.call(grid.arrange, c(plots, ncol = 3))
+
+```
+
+5.  Plot relations between GPUs and Memory.
+
+```{r}
+# Step 3: Exploratory Data Analysis (EDA)
+# Memory and GPU Requirements
+ggplot(df, aes(x = mem_req, y = num_gpus_req)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Memory Requirement vs. GPU Requirement",
+       x = "Memory Requirement",
+       y = "Number of GPUs Required")
+
+```
+
+6.  Plot relations between Run Time and Power Consumption.
+
+```{r}
+# Further analysis of the relationship between run time and power consumption
+ggplot(df, aes(x = run_time, y = mean_power)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Run Time vs. Power Consumption",
+       x = "Run Time (in seconds)",
+       y = "Mean Power (in Watts)")
+
+```
+
+7.  Plot distribution of cores with log scaling for better visualization.
+
+```{r}
+# CPU Cores Distribution with Log Scale
+ggplot(df, aes(x = num_cores_req)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black") +
+  scale_x_log10() +
+  labs(title = "Distribution of CPU Cores Required (Log Scale)",
+       x = "Number of Cores (Log Scale)",
+       y = "Frequency") +
+  theme_minimal()
+
+```
+
+8.  Calculate Correlations and Mutual Information between the variables.
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(reshape2)
+library(corrplot)
+library(infotheo) # for mutual information
+
+# Select numeric columns only
+numeric_df <- df %>% select(where(is.numeric))
+
+# Compute Pearson and Spearman correlation matrices
+pearson_corr <- cor(numeric_df, method = "pearson", use = "complete.obs")
+spearman_corr <- cor(numeric_df, method = "spearman", use = "complete.obs")
+
+```
+
+9.  Plot the correlation matrices.
+
+```{r}
+# Plot Pearson correlation matrix
+# Plot Pearson correlation matrix with smaller text size for coefficients
+corrplot(pearson_corr, method = "color", col = colorRampPalette(c("blue", "white", "red"))(200),
+         title = "Pearson Correlation Matrix", tl.cex = 0.8, addCoef.col = "black", number.cex = 0.6)
+
+# Plot Spearman correlation matrix with smaller text size for coefficients
+corrplot(spearman_corr, method = "color", col = colorRampPalette(c("blue", "white", "red"))(200),
+         title = "Spearman Correlation Matrix", tl.cex = 0.8, addCoef.col = "black", number.cex = 0.6)
+
+
+```
+
+10. Plot the MI matrix.
+
+```{r}
+# Calculate Mutual Information for each pair of numeric variables
+mi_matrix <- matrix(0, ncol = ncol(numeric_df), nrow = ncol(numeric_df))
+colnames(mi_matrix) <- colnames(numeric_df)
+rownames(mi_matrix) <- colnames(numeric_df)
+
+for (i in 1:ncol(numeric_df)) {
+  for (j in 1:ncol(numeric_df)) {
+    mi_matrix[i, j] <- mutinformation(discretize(numeric_df[[i]]), discretize(numeric_df[[j]]))
+  }
+}
+
+# Convert to long format for ggplot2
+mi_long <- melt(mi_matrix)
+colnames(mi_long) <- c("Variable1", "Variable2", "MutualInformation")
+
+# Plot Mutual Information heatmap
+ggplot(mi_long, aes(x = Variable1, y = Variable2, fill = MutualInformation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "darkgreen") +
+  labs(title = "Mutual Information Matrix", x = "", y = "") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Following the data analysis section. This Notebook moves on to a Unsupervised Learning K-Cluster model to characterize data based on run time and total power spendings.
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+data <- df %>%
+  select(run_time, total_power)  # Extract the relevant columns
+
+scaled_data <- as.data.frame(scale(data))    # Standardize the transformed data
+
+
+# Step 3: Determine optimal K using the elbow method
+wss <- vector("numeric", length = 10)  # Empty vector to store WSS (within-cluster sum of squares)
+for (k in 1:10) {
+  kmeans_model <- kmeans(scaled_data, centers = k, nstart = 30)  # Fit k-means modelz
+  wss[k] <- kmeans_model$tot.withinss  # Store total within-cluster sum of squares
+}
+
+# Plot the Elbow Method graph
+elbow_plot <- ggplot(data.frame(K = 1:10, WSS = wss), aes(x = K, y = WSS)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Elbow Method for Optimal K", x = "Number of Clusters", y = "Within-cluster Sum of Squares (WSS)") +
+  theme_minimal()
+
+print(elbow_plot)
+```
+
+```{r}
+
+library(ggplot2)
+library(fpc)   
+library(cluster) 
+
+# Step 4: Perform K-means clustering (Assuming 7 clusters from elbow method)
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(scaled_data, centers = 7, nstart = 30)
+
+# Step 5: Add the cluster labels to the original dataframe
+df$cluster <- as.factor(kmeans_result$cluster)
+
+# --- Evaluate Clustering Performance --- #
+
+# 1. **Inertia (Within-Cluster Sum of Squares)**
+inertia <- kmeans_result$tot.withinss
+cat("Inertia (WSS):", inertia, "\n")
+
+
+# 3. **Cluster Visualization (PCA for 2D plot)**
+# Perform PCA to reduce the data to two dimensions for better visualization
+pca_result <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
+pca_df <- data.frame(pca_result$x[, 1:2], cluster = as.factor(kmeans_result$cluster))
+
+# Plot clusters in the first two principal components
+cluster_plot_pca <- ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(size = 3) +
+  labs(title = "K-means Clustering of Run Time and Total Power (PCA)", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+print(cluster_plot_pca)
+
+
+# --- Visualize the clustering results for the original features (run_time vs total_power) ---
+cluster_plot <- ggplot(df, aes(x = run_time, y = total_power, color = cluster)) +
+  geom_point(size = 3) +
+  labs(title = "K-means Clustering of Run Time and Total Power", x = "Run Time", y = "Total Power") +
+  theme_minimal()
+
+print(cluster_plot)
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+conflicts_prefer(dplyr::filter)
+
+
+# Step 1: Summarize numeric columns with mean, sd, etc., and factor columns with counts
+cluster_summary <- df %>%
+  group_by(cluster) %>%
+  summarise(
+    # Numeric summaries for run_time and total_power
+    run_time_mean = mean(run_time, na.rm = TRUE),
+    run_time_sd = sd(run_time, na.rm = TRUE),
+    total_power_mean = mean(total_power, na.rm = TRUE),
+    total_power_sd = sd(total_power, na.rm = TRUE),
+    
+    # Mode of qos if it's a factor or character column
+    qos_mode = if(is.factor(df$qos) || is.character(df$qos)) {
+      names(sort(table(qos), decreasing = TRUE))[1]
+    } else {
+      NA
+    },
+    
+    # Example if priority is numeric
+    priority_mean = if(is.numeric(df$priority)) mean(priority, na.rm = TRUE) else NA,
+    
+    # Count of points in each cluster
+    count = n()
+  )
+
+print(cluster_summary)
+
+# Step 2: View each cluster's data (optional)
+# Example: Filter data for cluster 1
+cluster_1_data <- df %>% filter(cluster == 1)  # assuming cluster is numeric
+head(cluster_1_data)
+
+# Step 3: Visualize each feature's distribution by cluster
+
+# Histogram of run_time by cluster
+ggplot(df, aes(x = run_time, fill = cluster)) +
+  geom_histogram(binwidth = 5000, alpha = 0.6, position = "dodge") +
+  labs(title = "Run Time Distribution by Cluster", x = "Run Time", y = "Count") +
+  theme_minimal()
+
+# Boxplot of total_power by cluster
+ggplot(df, aes(x = cluster, y = total_power, fill = cluster)) +
+  geom_boxplot(alpha = 0.6) +
+  labs(title = "Total Power by Cluster", x = "Cluster", y = "Total Power") +
+  theme_minimal()
+
+# Step 4: Detailed Summary of each cluster (numeric features only)
+cluster_details <- df %>%
+  group_by(cluster) %>%
+  summarise(
+    across(where(is.numeric), list(mean = mean, median = median, min = min, max = max, sd = sd), .names = "{.col}_{.fn}")
+  )
+
+print(cluster_details)
+
+```
